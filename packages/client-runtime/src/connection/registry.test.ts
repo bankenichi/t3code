@@ -1,6 +1,8 @@
 import {
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
+  ORCHESTRATION_PROTOCOL_VERSION,
+  type ExecutionEnvironmentDescriptor,
   type OrchestrationShellSnapshot,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -55,6 +57,9 @@ import {
 import * as RpcSession from "../rpc/session.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import { watchDiscoveredCompatibility } from "./layer.ts";
+import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
+import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
 import { runDesktopCommitWithReconnectObserver } from "../state/server.ts";
 
 const TARGET = new PrimaryConnectionTarget({
@@ -676,6 +681,120 @@ describe("EnvironmentRegistry", () => {
     }),
   );
 
+  it.effect("only a fresh descriptor for the rejected environment unlocks it", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([RELAY_TARGET], [], [], {
+        initialDisabled: [RELAY_TARGET.environmentId],
+      });
+      const descriptor = (environmentId: EnvironmentId): ExecutionEnvironmentDescriptor => ({
+        environmentId,
+        label: "Server",
+        platform: { os: "linux", arch: "x64" },
+        serverVersion: "1.0.0",
+        orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+        capabilities: { repositoryIdentity: true },
+      });
+      const discovered = (value: ExecutionEnvironmentDescriptor) => {
+        const environment = {
+          environmentId: value.environmentId,
+          label: value.label,
+          endpoint: {
+            httpBaseUrl: "https://relay.example.test",
+            wsBaseUrl: "wss://relay.example.test",
+            providerKind: "manual" as const,
+          },
+          linkedAt: "2026-09-15T00:00:00Z",
+        };
+        const status: RelayEnvironmentStatusResponse = {
+          environmentId: value.environmentId,
+          endpoint: environment.endpoint,
+          status: "online",
+          checkedAt: "2026-09-15T00:00:00Z",
+          descriptor: value,
+        };
+        return {
+          environment,
+          availability: "online" as const,
+          status: Option.some(status),
+          error: Option.none(),
+        };
+      };
+      const original = discovered(descriptor(RELAY_TARGET.environmentId));
+      const discoveryState =
+        yield* SubscriptionRef.make<RelayEnvironmentDiscovery.RelayEnvironmentDiscoveryState>({
+          ...RelayEnvironmentDiscovery.EMPTY_RELAY_ENVIRONMENT_DISCOVERY_STATE,
+          environments: new Map([[RELAY_TARGET.environmentId, original]]),
+        });
+      const initial = yield* Deferred.make<void>();
+      const unrelated = yield* Deferred.make<void>();
+      const refreshed = yield* Deferred.make<void>();
+      let firstEnvironmentCalls = 0;
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* watchDiscoveredCompatibility().pipe(
+          Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, {
+            ...registry,
+            setCompatibility: (environmentId, error) =>
+              registry.setCompatibility(environmentId, error).pipe(
+                Effect.andThen(
+                  Effect.gen(function* () {
+                    if (environmentId === RELAY_TARGET.environmentId) {
+                      firstEnvironmentCalls += 1;
+                      yield* Deferred.succeed(
+                        firstEnvironmentCalls === 1 ? initial : refreshed,
+                        undefined,
+                      );
+                    } else yield* Deferred.succeed(unrelated, undefined);
+                  }),
+                ),
+              ),
+          }),
+          Effect.provideService(
+            RelayEnvironmentDiscovery.RelayEnvironmentDiscovery,
+            RelayEnvironmentDiscovery.RelayEnvironmentDiscovery.of({
+              state: discoveryState,
+              refresh: Effect.void,
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(initial);
+        const error = new ConnectionBlockedError({
+          reason: "unsupported",
+          detail: "Socket discovered a newer protocol.",
+        });
+        yield* registry.setCompatibility(RELAY_TARGET.environmentId, error);
+        yield* SubscriptionRef.update(discoveryState, (state) => ({
+          ...state,
+          environments: new Map(state.environments).set(
+            SECOND_TARGET.environmentId,
+            discovered(descriptor(SECOND_TARGET.environmentId)),
+          ),
+        }));
+        yield* Deferred.await(unrelated);
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(RELAY_TARGET.environmentId)
+            ?.unsupportedReason,
+        ).toBe(error.message);
+        yield* SubscriptionRef.update(discoveryState, (state) => ({
+          ...state,
+          environments: new Map(state.environments).set(
+            RELAY_TARGET.environmentId,
+            discovered(descriptor(RELAY_TARGET.environmentId)),
+          ),
+        }));
+        yield* Deferred.await(refreshed);
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(RELAY_TARGET.environmentId),
+        ).toMatchObject({ enabled: false });
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(RELAY_TARGET.environmentId)
+            ?.unsupportedReason,
+        ).toBeUndefined();
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
   it.effect("discovery keeps unsupported environments off until compatibility changes", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([RELAY_TARGET], [], [], {
@@ -1155,6 +1274,55 @@ describe("EnvironmentRegistry", () => {
         const error = yield* Fiber.join(stateLookup);
         expect(error._tag).toBe("EnvironmentNotRegisteredError");
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect("platform refreshes preserve unsupported state for the same endpoint", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([]);
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const registration = new PrimaryConnectionRegistration({ target: TARGET });
+        yield* registry.registerPlatform(registration);
+        yield* awaitConnectionState(
+          registry,
+          TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        const error = new ConnectionBlockedError({
+          reason: "unsupported",
+          detail: "Use a compatible client.",
+        });
+        yield* registry.setCompatibility(TARGET.environmentId, error);
+        yield* awaitConnectionState(
+          registry,
+          TARGET.environmentId,
+          (state) => state.phase === "available",
+        );
+        yield* registry.registerPlatform(registration);
+        yield* registry.reconcilePlatform([registration]);
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(TARGET.environmentId),
+        ).toMatchObject({ enabled: false, unsupportedReason: error.message });
+        expect(yield* Ref.get(harness.sessions)).toHaveLength(1);
+        yield* registry.registerPlatform(
+          new PrimaryConnectionRegistration({
+            target: new PrimaryConnectionTarget({
+              ...TARGET,
+              httpBaseUrl: "https://changed.example.test",
+            }),
+          }),
+        );
+        yield* awaitConnectionState(
+          registry,
+          TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(TARGET.environmentId)
+            ?.unsupportedReason,
+        ).toBeUndefined();
+      }).pipe(Effect.provide(harness.layer));
     }),
   );
 

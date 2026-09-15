@@ -485,12 +485,17 @@ export const make = Effect.gen(function* () {
 
   const installPlatformRegistration = Effect.fn("EnvironmentRegistry.installPlatformRegistration")(
     function* (registration: PlatformConnectionRegistration) {
-      const entry = connectionRegistrationCatalogEntry(registration);
-      const target = entry.target;
+      const registered = connectionRegistrationCatalogEntry(registration);
+      const target = registered.target;
       yield* withLeaseLock(
         target.environmentId,
         Effect.gen(function* () {
           const previous = (yield* SubscriptionRef.get(entries)).get(target.environmentId);
+          const entry: ConnectionCatalogEntry =
+            previous?.unsupportedReason !== undefined &&
+            gitHubRoutingConnectionKey(previous) === gitHubRoutingConnectionKey(registered)
+              ? { ...registered, enabled: false, unsupportedReason: previous.unsupportedReason }
+              : registered;
           const persistedTarget = (yield* Ref.get(persistedTargetsByEnvironment)).get(
             target.environmentId,
           );
