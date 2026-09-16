@@ -202,7 +202,14 @@ export interface OpenCodeRuntimeShape {
 }
 
 export function isOpenCodeV2VersionOutput(stdout: string, binaryPath?: string): boolean {
+  const versionMatch = stdout.match(
+    /(?:^|\s)opencode\s+v?(\d+)\.(\d+)\.(\d+)(?:-[\da-z.-]+)?(?:\+[\da-z.-]+)?(?:\s|$)/i,
+  );
+
+  const majorVersion = versionMatch ? Number(versionMatch[1]) : 0;
+
   return (
+    majorVersion >= 2 ||
     /(?:^|\s)opencode2(?:\s|$)/i.test(stdout) ||
     /\b0\.0\.0-(?:dev|beta|next|prod|local)-\d+(?:\.\d+)?\b/i.test(stdout) ||
     /(?:^|[/\\])opencode2(?:\.(?:cmd|bat|exe))?$/i.test(binaryPath ?? "")
