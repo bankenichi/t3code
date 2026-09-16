@@ -1,4 +1,4 @@
-import type { ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
+import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -19,7 +19,7 @@ export const watchDiscoveredCompatibility = Effect.fn("connection.watchDiscovere
   function* () {
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
     const discovery = yield* RelayEnvironmentDiscovery.RelayEnvironmentDiscovery;
-    const seenDescriptors = new Map<string, ExecutionEnvironmentDescriptor>();
+    const seenChecks = new Map<string, RelayEnvironmentStatusResponse>();
     yield* Stream.merge(
       SubscriptionRef.changes(discovery.state),
       SubscriptionRef.changes(registry.entries),
@@ -27,18 +27,26 @@ export const watchDiscoveredCompatibility = Effect.fn("connection.watchDiscovere
       Stream.runForEach(() =>
         Effect.gen(function* () {
           const current = yield* SubscriptionRef.get(discovery.state);
-          for (const environmentId of seenDescriptors.keys()) {
-            if (!current.environments.has(environmentId)) seenDescriptors.delete(environmentId);
+          if (!current.refreshing) {
+            for (const environmentId of seenChecks.keys()) {
+              if (!current.environments.has(environmentId)) seenChecks.delete(environmentId);
+            }
           }
           for (const entry of current.environments.values()) {
-            const descriptor = Option.getOrNull(entry.status)?.descriptor;
-            if (descriptor === undefined) continue;
+            const status = Option.getOrNull(entry.status);
+            const descriptor = status?.descriptor;
+            if (status === null || descriptor === undefined) continue;
             const environmentId = entry.environment.environmentId;
-            const fresh = seenDescriptors.get(environmentId) !== descriptor;
+            const previous = seenChecks.get(environmentId);
+            const fresh =
+              previous?.checkedAt !== status.checkedAt ||
+              (previous.descriptor?.orchestrationProtocolVersion ?? 1) !==
+                (descriptor.orchestrationProtocolVersion ?? 1) ||
+              previous.descriptor?.serverVersion !== descriptor.serverVersion;
             const error = orchestrationProtocolCompatibilityError(descriptor);
-            // Only a new descriptor for this environment can clear a socket rejection.
+            // A replayed health result must not clear a newer socket rejection.
             if (error !== null || fresh) yield* registry.setCompatibility(environmentId, error);
-            seenDescriptors.set(environmentId, descriptor);
+            seenChecks.set(environmentId, status);
           }
         }).pipe(
           Effect.catch((error) =>

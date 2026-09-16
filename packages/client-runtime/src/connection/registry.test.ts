@@ -681,7 +681,7 @@ describe("EnvironmentRegistry", () => {
     }),
   );
 
-  it.effect("only a fresh descriptor for the rejected environment unlocks it", () =>
+  it.effect("only a fresh health check for the rejected environment unlocks it", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([RELAY_TARGET], [], [], {
         initialDisabled: [RELAY_TARGET.environmentId],
@@ -694,7 +694,10 @@ describe("EnvironmentRegistry", () => {
         orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
         capabilities: { repositoryIdentity: true },
       });
-      const discovered = (value: ExecutionEnvironmentDescriptor) => {
+      const discovered = (
+        value: ExecutionEnvironmentDescriptor,
+        checkedAt = "2026-09-15T00:00:00Z",
+      ) => {
         const environment = {
           environmentId: value.environmentId,
           label: value.label,
@@ -709,7 +712,7 @@ describe("EnvironmentRegistry", () => {
           environmentId: value.environmentId,
           endpoint: environment.endpoint,
           status: "online",
-          checkedAt: "2026-09-15T00:00:00Z",
+          checkedAt,
           descriptor: value,
         };
         return {
@@ -727,8 +730,10 @@ describe("EnvironmentRegistry", () => {
         });
       const initial = yield* Deferred.make<void>();
       const unrelated = yield* Deferred.make<void>();
+      const replayed = yield* Deferred.make<void>();
       const refreshed = yield* Deferred.make<void>();
       let firstEnvironmentCalls = 0;
+      let secondEnvironmentCalls = 0;
       yield* Effect.gen(function* () {
         const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
         yield* watchDiscoveredCompatibility().pipe(
@@ -744,7 +749,13 @@ describe("EnvironmentRegistry", () => {
                         firstEnvironmentCalls === 1 ? initial : refreshed,
                         undefined,
                       );
-                    } else yield* Deferred.succeed(unrelated, undefined);
+                    } else {
+                      secondEnvironmentCalls += 1;
+                      yield* Deferred.succeed(
+                        secondEnvironmentCalls === 1 ? unrelated : replayed,
+                        undefined,
+                      );
+                    }
                   }),
                 ),
               ),
@@ -778,9 +789,30 @@ describe("EnvironmentRegistry", () => {
         ).toBe(error.message);
         yield* SubscriptionRef.update(discoveryState, (state) => ({
           ...state,
+          refreshing: true,
+          environments: new Map(),
+        }));
+        yield* SubscriptionRef.update(discoveryState, (state) => ({
+          ...state,
+          refreshing: false,
+          environments: new Map([
+            [RELAY_TARGET.environmentId, discovered(descriptor(RELAY_TARGET.environmentId))],
+            [
+              SECOND_TARGET.environmentId,
+              discovered(descriptor(SECOND_TARGET.environmentId), "2026-09-15T00:01:00Z"),
+            ],
+          ]),
+        }));
+        yield* Deferred.await(replayed);
+        expect(
+          (yield* SubscriptionRef.get(registry.entries)).get(RELAY_TARGET.environmentId)
+            ?.unsupportedReason,
+        ).toBe(error.message);
+        yield* SubscriptionRef.update(discoveryState, (state) => ({
+          ...state,
           environments: new Map(state.environments).set(
             RELAY_TARGET.environmentId,
-            discovered(descriptor(RELAY_TARGET.environmentId)),
+            discovered(descriptor(RELAY_TARGET.environmentId), "2026-09-15T00:02:00Z"),
           ),
         }));
         yield* Deferred.await(refreshed);
