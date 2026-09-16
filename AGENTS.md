@@ -1,3 +1,31 @@
+# Personal fork (bankenichi)
+
+This checkout's push target is **https://github.com/bankenichi/t3code** (`origin`).
+Upstream is **https://github.com/pingdotgg/t3code** (`upstream`) — fetch/sync only.
+
+**Hard rules for agents:**
+
+- Commit and push only to `origin` (`bankenichi/t3code`).
+- Do **not** push to `upstream` (`pingdotgg/t3code`).
+- Do **not** open PRs against `pingdotgg/t3code` unless Gabriel explicitly asks.
+- Prefer local commit + push on the fork over upstream contribution workflows.
+
+---
+
+# Personal fork (bankenichi)
+
+This checkout�s push target is **https://github.com/bankenichi/t3code** (`origin`).
+Upstream is **https://github.com/pingdotgg/t3code** (`upstream`) � fetch/sync only.
+
+**Hard rules for agents:**
+
+- Commit and push only to `origin` (`bankenichi/t3code`).
+- Do **not** push to `upstream` (`pingdotgg/t3code`).
+- Do **not** open PRs against `pingdotgg/t3code` unless Gabriel explicitly asks.
+- Prefer local commit + push on the fork over upstream contribution workflows.
+
+---
+
 # T3 Code
 
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs (Codex, Claude Code, Cursor, Grok, OpenCode) and serves web, desktop, and mobile clients.
